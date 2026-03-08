@@ -1,0 +1,231 @@
+services:
+  # ---------------------------------------------------------
+  # PostgreSQL 16 – primary database for Saleor
+  # ---------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: saleor-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        ['CMD', 'pg_isready', '-U', '${POSTGRES_USER}', '-d', '${POSTGRES_DB}']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------
+  # Redis – cache and broker for Saleor
+  # ---------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: saleor-redis
+    restart: unless-stopped
+    command: ['redis-server', '--requirepass', '${REDIS_PASSWORD}']
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    healthcheck:
+      test: ['CMD', 'redis-cli', '-a', '${REDIS_PASSWORD}', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------
+  # Saleor Core API
+  # ---------------------------------------------------------
+  saleor-api:
+    image: ghcr.io/saleor/saleor:3.15
+    container_name: saleor-api
+    restart: unless-stopped
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      # Database connection
+      DATABASE_URL: 'postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}'
+      # Redis connection
+      REDIS_URL: 'redis://:${REDIS_PASSWORD}@redis:6379/0'
+      # MinIO (S3) configuration – placeholders only
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      AWS_S3_ENDPOINT_URL: http://minio:9000
+      # Additional placeholders from the security‑audit task
+      SECRET_KEY: ${SECRET_KEY}
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS}
+      DEBUG: 'True'
+      EMAIL_HOST_PASSWORD: ${EMAIL_HOST_PASSWORD}
+    ports:
+      - '8001:8000'
+    healthcheck:
+      test: ['CMD', 'curl', '-f', 'http://localhost:8000/health/']
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------
+  # Saleor MCP Server – webhook and background task processor
+  # ---------------------------------------------------------
+  saleor-mcp:
+    image: saleor/saleor-mcp:latest
+    container_name: saleor-mcp
+    restart: unless-stopped
+    depends_on:
+      saleor-api:
+        condition: service_healthy
+    environment:
+      SALEOR_API_URL: http://saleor-api:8000/graphql/
+      SALEOR_TOKEN: ${SALEOR_MCP_TOKEN}
+    ports:
+      - '3100:3100'
+    healthcheck:
+      test: ['CMD', 'curl', '-f', 'http://localhost:3100/health']
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------
+  # PostgreSQL MCP Server – read-only database access
+  # ---------------------------------------------------------
+  postgres-mcp:
+    image: mcp/postgres
+    container_name: postgres-mcp
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: 'postgres://saleor:${POSTGRES_PASSWORD}@postgres:5432/saleor?sslmode=disable'
+    ports:
+      - '3101:3101'
+    healthcheck:
+      test: ['CMD', 'curl', '-f', 'http://localhost:3101/health']
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------
+  # Fetch MCP Server – web fetch capabilities
+  # ---------------------------------------------------------
+  fetch-mcp:
+    image: mcp/server-fetch
+    container_name: fetch-mcp
+    restart: unless-stopped
+    ports:
+      - '3102:3102'
+    healthcheck:
+      test: ['CMD', 'curl', '-f', 'http://localhost:3102/health']
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------
+  # GraphQL Playground – UI for testing GraphQL API
+  # NOTE: Saleor has built-in GraphQL Playground at /graphql/
+  # This section kept for reference but commented out as image is deprecated
+  # ---------------------------------------------------------
+  # playground:
+  #     image: graphql/graphql-playground
+  #     container_name: saleor-playground
+  #     restart: unless-stopped
+  #     depends_on:
+  #         - saleor-api
+  #     environment:
+  #         PLAYGROUND_ENDPOINT: http://saleor-api:8000/graphql/
+  #     ports:
+  #         - "8080:8080"
+
+  # ---------------------------------------------------------
+  # MinIO – object storage (used by Saleor configurator)
+  # ---------------------------------------------------------
+  minio:
+    image: minio/minio:latest
+    container_name: saleor-minio
+    command: server /data --console-address ":9001"
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - '9002:9000' # S3 API
+      - '9003:9001' # Console
+    volumes:
+      - minio_data:/data
+
+  # ---------------------------------------------------------
+  # n8n – workflow automation
+  # ---------------------------------------------------------
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: n8n
+    restart: unless-stopped
+    depends_on:
+      - postgres
+      - redis
+    environment:
+      DB_TYPE: postgres
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: 5432
+      DB_POSTGRESDB_DATABASE: ${POSTGRES_DB}
+      DB_POSTGRESDB_USER: ${POSTGRES_USER}
+      DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD}
+      # Optional basic auth for the UI (placeholders)
+      N8N_BASIC_AUTH_ACTIVE: 'true'
+      N8N_BASIC_AUTH_USER: ${N8N_BASIC_AUTH_USER}
+      N8N_BASIC_AUTH_PASSWORD: ${N8N_BASIC_AUTH_PASSWORD}
+    ports:
+      - '5678:5678'
+    volumes:
+      - n8n_data:/home/node/.n8n
+
+  # ---------------------------------------------------------
+  # Temporal – durable workflow engine (admin tools)
+  # ---------------------------------------------------------
+  temporal:
+    image: temporalio/admin-tools:latest
+    container_name: temporal
+    restart: unless-stopped
+    ports:
+      - '7233:7233'
+      - '8080:8080'
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+
+  # ---------------------------------------------------------
+  # PostgreSQL backup sidecar (pg_dump via cron)
+  # ---------------------------------------------------------
+  pg-backup:
+    image: postgres:16-alpine
+    container_name: pg-backup
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_backup:/backups
+      - ./scripts/pg_backup.sh:/usr/local/bin/pg_backup.sh:ro
+    entrypoint: ['/bin/sh', '-c']
+    command: |
+      "while true; do
+         /usr/local/bin/pg_backup.sh
+         sleep 86400   # run once a day; replace with cron if preferred
+       done"
+
+volumes:
+  postgres_data:
+  minio_data:
+  n8n_data:
+  postgres_backup:

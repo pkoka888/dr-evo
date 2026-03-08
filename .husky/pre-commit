@@ -31,5 +31,5 @@ else
   npx_cmd="npx"
 fi
 
-node scripts/generate-index.js && git add plans/studies/index/STUDIES_INDEX.md && $npx_cmd lint-staged
+node scripts/generate-index.js && git add plans/studies/index/STUDIES_INDEX.md && node scripts/generate-adr-index.js && git add adr/README.md && $npx_cmd lint-staged
 $pnpm_cmd lint
